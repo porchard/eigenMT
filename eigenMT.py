@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 from __future__ import print_function
 import os
 import sys
@@ -9,6 +11,9 @@ import scipy.linalg as splin
 import gc
 import gzip
 from sklearn import covariance
+import logging
+
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s: %(message)s')
 
 ##############FUNCTIONS
 
@@ -85,6 +90,9 @@ def make_gen_dict(GEN_fh, pos_dict, sample_ids=None):
             ix = [header[1:].index(i) for i in sample_ids]
         for line in GEN: #Go through each line of the genotype matrix and add line to gen_dict
             line = line.rstrip().split()
+            # might not be in the pos_dict if not in the chromosome (since pos_dict is filtered by chromosome)
+            if line[0] not in pos_dict:
+                continue
             snp = pos_dict[line[0]]
             genos = np.array(line[1:])
             if sample_ids is not None:
@@ -211,7 +219,7 @@ def make_test_dict_external(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist
     return test_dict, "\t".join(header)
 
 
-def bf_eigen_windows(test_dict, gen_dict, phepos_dict, OUT_fh, input_header, var_thresh, window):
+def bf_eigen_windows(test_dict, gen_dict, phepos_dict, OUT_fh, input_header, var_thresh, window, collapse_redundant_variants):
     '''
     Function to process dict of SNP-gene tests.
     Calculates the genotype correlation matrix for the SNPs tested for each gene using windows around the gene.
@@ -222,7 +230,7 @@ def bf_eigen_windows(test_dict, gen_dict, phepos_dict, OUT_fh, input_header, var
     Will output to file corrected pvalue for best SNP per gene as it goes along.
     '''
     OUT = open(OUT_fh, 'w')
-    OUT.write(input_header + '\tBF\tTESTS\n')
+    OUT.write(input_header + '\tBF\tTESTS\talpha\n')
 
     counter = 1.0
     genes = test_dict.keys()
@@ -251,6 +259,11 @@ def bf_eigen_windows(test_dict, gen_dict, phepos_dict, OUT_fh, input_header, var
             for snp in snps_window:
                 if snp in gen_dict:
                     genotypes.append(gen_dict[snp])
+            if collapse_redundant_variants:
+                correlations = np.round(np.absolute(np.corrcoef(genotypes)), 5) # round to 5 decimal places to account for floating point errors
+                block_representative = np.unique(np.argmax(correlations, axis=0)).tolist() # idxmax will always be ~1, since if there are no variants in LD with another variant it'll still be correlation=1 with itself.
+                logging.info('Collapsed {:,} variants to {:,}'.format(len(genotypes), len(block_representative)))
+                genotypes = [genotypes[i] for i in block_representative]
             genotypes = np.matrix(genotypes)
             m, n = np.shape(genotypes)
             gen_corr, alpha = lw_shrink(genotypes)
@@ -262,7 +275,7 @@ def bf_eigen_windows(test_dict, gen_dict, phepos_dict, OUT_fh, input_header, var
             stop += window
             if stop > M:
                 stop = M
-        OUT.write(test_dict[gene]['line'] + '\t' + str(min(test_dict[gene]['pval'] * m_eff, 1)) + '\t' + str(m_eff) + '\n')
+        OUT.write(test_dict[gene]['line'] + '\t' + str(min(test_dict[gene]['pval'] * m_eff, 1)) + '\t' + str(m_eff) + '\t' + str(alpha) + '\n')
         OUT.flush()
         gc.collect()
     OUT.close()
@@ -324,6 +337,7 @@ if __name__=='__main__':
     parser.add_argument('--external', action = 'store_true', help = 'indicates whether the provided genotype matrix is different from the one used to call cis-eQTLs initially (default = False)')
     parser.add_argument('--sample_list', default=None, help='File with sample IDs (one per line) to select from genotypes')
     parser.add_argument('--phenotype_groups', default=None, help='File with phenotype_id->group_id mapping')
+    parser.add_argument('--collapse-redundant-variants', action = 'store_true', help = 'If variants are in perfect LD, collapse them before calculating eigen values (default = False)')
     args = parser.parse_args()
 
     ##Make SNP position dict
@@ -363,4 +377,4 @@ if __name__=='__main__':
 
     ##Perform BF correction using eigenvalue decomposition of the correlation matrix
     print('Performing eigenMT correction.', flush=True)
-    bf_eigen_windows(test_dict, gen_dict, phepos_dict, args.OUT, input_header, args.var_thresh, args.window)
+    bf_eigen_windows(test_dict, gen_dict, phepos_dict, args.OUT, input_header, args.var_thresh, args.window, args.collapse_redundant_variants)
